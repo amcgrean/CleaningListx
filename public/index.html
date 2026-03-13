@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cleaning Schedule Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Playfair+Display:ital,wght@0,700;1,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section id="auth-card" class="auth-card">
+        <h1>Cleaning Schedule</h1>
+        <p>Login to manage your personal weekly cleaning tracker.</p>
+        <form id="auth-form">
+          <label>
+            Username
+            <input name="username" required />
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" required minlength="6" />
+          </label>
+          <div class="auth-actions">
+            <button type="button" data-mode="login">Login</button>
+            <button type="button" data-mode="register" class="secondary">Register</button>
+          </div>
+          <p id="auth-message"></p>
+        </form>
+      </section>
+
+      <section id="schedule" class="schedule hidden">
+        <header class="hero">
+          <p>DAILY, WEEKLY, MONTHLY &amp; ANNUAL</p>
+          <h1>Cleaning Schedule</h1>
+          <div class="toolbar">
+            <div class="week-nav">
+              <button id="prev-week">◀</button>
+              <strong id="week-label"></strong>
+              <button id="next-week">▶</button>
+            </div>
+            <div class="user-actions">
+              <span id="whoami"></span>
+              <button id="logout" class="secondary">Logout</button>
+            </div>
+          </div>
+        </header>
+
+        <section id="weekly-grid" class="weekly-grid"></section>
+
+        <section class="lower-grid">
+          <article class="card monthly-card">
+            <h2>Monthly</h2>
+            <div id="monthly-list"></div>
+          </article>
+          <article class="card matrix-card">
+            <h2>Year track</h2>
+            <div id="month-track" class="month-track"></div>
+          </article>
+        </section>
+
+        <section class="card annual-card">
+          <h2>Annual</h2>
+          <div id="annual-list" class="annual-list"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
