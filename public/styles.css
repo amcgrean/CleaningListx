@@ -1,0 +1,167 @@
+:root {
+  --bg: #faf6f2;
+  --ink: #2a2525;
+  --line: #d7cfc8;
+  --daily: #f2b6b2;
+  --mon: #efbfaa;
+  --tue: #f4c48f;
+  --wed: #c3c6c8;
+  --thu: #c5cdd4;
+  --fri: #cabec8;
+  --sat: #d9b4bf;
+  --sun: #ebaeb2;
+  --annual: #cbbfda;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, sans-serif;
+  color: var(--ink);
+  background: linear-gradient(180deg, #f7f2ec, #fefbf7);
+}
+
+.app-shell {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.auth-card,
+.card {
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: 12px;
+  padding: 18px;
+}
+
+.auth-card { max-width: 420px; margin: 15vh auto 0; }
+.auth-card h1 { font-family: 'Playfair Display', serif; font-size: 2rem; margin: 0; }
+.auth-card label { display: block; margin: 12px 0; font-weight: 600; }
+.auth-card input {
+  width: 100%; margin-top: 6px; border: 1px solid #c7b9af; border-radius: 8px; padding: 10px;
+}
+.auth-actions { display: flex; gap: 10px; }
+button {
+  border: 1px solid #bba89e;
+  background: #eecbc7;
+  color: #332;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.secondary { background: #f6efea; }
+
+.hidden { display: none !important; }
+
+.hero {
+  text-align: center;
+  margin-bottom: 12px;
+}
+.hero p { letter-spacing: 0.24em; font-size: 0.8rem; margin: 0; }
+.hero h1 {
+  margin: 8px 0 12px;
+  font-family: 'Playfair Display', serif;
+  font-size: clamp(2.1rem, 5vw, 3.4rem);
+  font-style: italic;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.week-nav { display: flex; align-items: center; gap: 12px; }
+.user-actions { display: flex; align-items: center; gap: 10px; }
+
+.weekly-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(190px, 1fr));
+  gap: 12px;
+}
+
+.day-card {
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.day-title {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  text-align: center;
+  padding: 8px;
+  font-weight: 700;
+}
+.task-row {
+  display: grid;
+  grid-template-columns: 1fr 20px;
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid #ebe4de;
+  padding: 8px;
+  font-size: 0.92rem;
+}
+.task-row input { width: 16px; height: 16px; }
+
+.lower-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+h2 { text-transform: uppercase; letter-spacing: 0.2em; text-align: center; margin: 0 0 10px; }
+.month-row,
+.annual-row {
+  display: grid;
+  grid-template-columns: 1fr 20px;
+  gap: 8px;
+  border-top: 1px solid #ebe4de;
+  padding: 8px 0;
+}
+.annual-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0 20px;
+}
+.month-track {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 6px;
+}
+.month-cell {
+  aspect-ratio: 1/1;
+  border-radius: 4px;
+  border: 1px solid #d7cfc8;
+  text-align: center;
+  font-size: 0.75rem;
+  display: grid;
+  place-items: center;
+  color: #645;
+}
+
+[data-theme='Daily'] .day-title { background: var(--daily); }
+[data-theme='Monday'] .day-title { background: var(--mon); }
+[data-theme='Tuesday'] .day-title { background: var(--tue); }
+[data-theme='Wednesday'] .day-title { background: var(--wed); }
+[data-theme='Thursday'] .day-title { background: var(--thu); }
+[data-theme='Friday'] .day-title { background: var(--fri); }
+[data-theme='Saturday'] .day-title { background: var(--sat); }
+[data-theme='Sunday'] .day-title { background: var(--sun); }
+.annual-card h2 { background: var(--annual); padding: 8px; border-radius: 8px; }
+.monthly-card h2 { background: var(--sun); padding: 8px; border-radius: 8px; }
+.matrix-card h2 { background: var(--mon); padding: 8px; border-radius: 8px; }
+
+@media (max-width: 1024px) {
+  .weekly-grid { grid-template-columns: repeat(2, minmax(230px, 1fr)); }
+  .lower-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 650px) {
+  .weekly-grid { grid-template-columns: 1fr; }
+  .annual-list { grid-template-columns: 1fr; }
+}
