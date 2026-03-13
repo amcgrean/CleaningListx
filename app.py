@@ -1,19 +1,24 @@
-import json
+import hashlib
 import os
 import secrets
 import sqlite3
 from datetime import datetime
-from http import cookies
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
-import hashlib
+from urllib.parse import urlparse
+
+from flask import Flask, jsonify, request, send_from_directory, session
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # Optional for local SQLite-only runs
+    psycopg = None
+    dict_row = None
 
 ROOT = Path(__file__).parent
 PUBLIC_DIR = ROOT / 'public'
 DB_PATH = ROOT / 'cleaning.db'
-
-SESSIONS = {}
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
 
 WEEKLY_SECTIONS = {
     'Daily': [
@@ -65,10 +70,25 @@ ANNUAL = [
 ]
 
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+class DB:
+    def __init__(self):
+        self.is_postgres = DATABASE_URL.startswith('postgres://') or DATABASE_URL.startswith('postgresql://')
+        if self.is_postgres and psycopg is None:
+            raise RuntimeError('DATABASE_URL is set to Postgres but psycopg is not installed.')
+
+    def connect(self):
+        if self.is_postgres:
+            return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def q(self, sql):
+        return sql.replace('?', '%s') if self.is_postgres else sql
+
+
+db = DB()
+_db_initialized = False
 
 
 def hash_password(password, salt=None):
@@ -83,187 +103,246 @@ def verify_password(password, encoded):
 
 
 def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.executescript('''
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      section TEXT NOT NULL,
-      frequency TEXT NOT NULL,
-      label TEXT NOT NULL,
-      sort_order INTEGER NOT NULL,
-      UNIQUE(section, label)
-    );
-    CREATE TABLE IF NOT EXISTS completions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      task_id INTEGER NOT NULL,
-      week_start TEXT NOT NULL,
-      completed INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_id, task_id, week_start)
-    );
-    ''')
-    if cur.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 0:
-        for section, labels in WEEKLY_SECTIONS.items():
-            for idx, label in enumerate(labels):
-                cur.execute('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)',
-                            (section, 'weekly', label, idx))
-        for idx, label in enumerate(MONTHLY):
-            cur.execute('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)',
-                        ('Monthly', 'monthly', label, idx))
-        for idx, (month, label) in enumerate(ANNUAL):
-            cur.execute('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)',
-                        (f'Annual {month}', 'annual', label, idx))
-    conn.commit()
-    conn.close()
+    global _db_initialized
+    if _db_initialized:
+        return
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+              id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+              username TEXT UNIQUE NOT NULL,
+              password_hash TEXT NOT NULL,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''' if db.is_postgres else '''
+            CREATE TABLE IF NOT EXISTS users (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              username TEXT UNIQUE NOT NULL,
+              password_hash TEXT NOT NULL,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS tasks (
+              id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+              section TEXT NOT NULL,
+              frequency TEXT NOT NULL,
+              label TEXT NOT NULL,
+              sort_order INTEGER NOT NULL,
+              UNIQUE(section, label)
+            )
+        ''' if db.is_postgres else '''
+            CREATE TABLE IF NOT EXISTS tasks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              section TEXT NOT NULL,
+              frequency TEXT NOT NULL,
+              label TEXT NOT NULL,
+              sort_order INTEGER NOT NULL,
+              UNIQUE(section, label)
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS completions (
+              id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+              user_id INTEGER NOT NULL,
+              task_id INTEGER NOT NULL,
+              week_start TEXT NOT NULL,
+              completed INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(user_id, task_id, week_start)
+            )
+        ''' if db.is_postgres else '''
+            CREATE TABLE IF NOT EXISTS completions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL,
+              task_id INTEGER NOT NULL,
+              week_start TEXT NOT NULL,
+              completed INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(user_id, task_id, week_start)
+            )
+        ''')
+
+        cur.execute('SELECT COUNT(*) AS count FROM tasks')
+        count_row = cur.fetchone()
+        count = count_row['count'] if db.is_postgres else count_row[0]
+        if count == 0:
+            for section, labels in WEEKLY_SECTIONS.items():
+                for idx, label in enumerate(labels):
+                    cur.execute(db.q('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)'),
+                                (section, 'weekly', label, idx))
+            for idx, label in enumerate(MONTHLY):
+                cur.execute(db.q('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)'),
+                            ('Monthly', 'monthly', label, idx))
+            for idx, (month, label) in enumerate(ANNUAL):
+                cur.execute(db.q('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)'),
+                            (f'Annual {month}', 'annual', label, idx))
+        conn.commit()
+
+    _db_initialized = True
 
 
-class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(PUBLIC_DIR), **kwargs)
+app = Flask(__name__, static_folder=str(PUBLIC_DIR), static_url_path='')
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-me')
 
-    def _json_body(self):
-        length = int(self.headers.get('Content-Length', '0'))
-        raw = self.rfile.read(length) if length else b'{}'
-        return json.loads(raw.decode() or '{}')
 
-    def _send_json(self, payload, status=200, extra_headers=None):
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        if extra_headers:
-            for k, v in extra_headers.items():
-                self.send_header(k, v)
-        self.end_headers()
-        self.wfile.write(body)
+@app.get('/api/auth/me')
+def auth_me():
+    init_db()
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'user': None})
 
-    def _session(self):
-        raw = self.headers.get('Cookie', '')
-        jar = cookies.SimpleCookie(raw)
-        sid = jar['sid'].value if 'sid' in jar else None
-        return sid, SESSIONS.get(sid)
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT id, username FROM users WHERE id = ?'), (user_id,))
+        user = cur.fetchone()
+    return jsonify({'user': dict(user) if user else None})
 
-    def _require_user(self):
-        _, user_id = self._session()
-        return user_id
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith('/api/'):
-            return self.api_get(parsed)
-        return super().do_GET()
+@app.get('/api/tasks')
+def get_tasks():
+    init_db()
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
 
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith('/api/'):
-            return self.api_post(parsed)
-        self.send_error(404)
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute('SELECT id, section, frequency, label, sort_order FROM tasks ORDER BY id')
+        rows = cur.fetchall()
+    return jsonify({'tasks': [dict(r) for r in rows]})
 
-    def api_get(self, parsed):
-        conn = get_conn()
-        user_id = self._require_user()
 
-        if parsed.path == '/api/auth/me':
-            if not user_id:
-                return self._send_json({'user': None})
-            user = conn.execute('SELECT id, username FROM users WHERE id = ?', (user_id,)).fetchone()
-            return self._send_json({'user': dict(user) if user else None})
+@app.get('/api/completions')
+def get_completions():
+    init_db()
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
 
-        if not user_id:
-            return self._send_json({'error': 'Unauthorized'}, 401)
+    week = request.args.get('weekStart')
+    if not week:
+        return jsonify({'error': 'weekStart query required'}), 400
 
-        if parsed.path == '/api/tasks':
-            rows = [dict(r) for r in conn.execute('SELECT id, section, frequency, label, sort_order FROM tasks ORDER BY id')]
-            return self._send_json({'tasks': rows})
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT task_id, completed FROM completions WHERE user_id = ? AND week_start = ?'), (user_id, week))
+        rows = cur.fetchall()
+    return jsonify({'completions': {r['task_id']: bool(r['completed']) for r in rows}})
 
-        if parsed.path == '/api/completions':
-            qs = parse_qs(parsed.query)
-            week = qs.get('weekStart', [None])[0]
-            if not week:
-                return self._send_json({'error': 'weekStart query required'}, 400)
-            rows = conn.execute('SELECT task_id, completed FROM completions WHERE user_id = ? AND week_start = ?',
-                                (user_id, week)).fetchall()
-            return self._send_json({'completions': {r['task_id']: bool(r['completed']) for r in rows}})
 
-        return self._send_json({'error': 'Not found'}, 404)
+@app.post('/api/auth/register')
+def register():
+    init_db()
+    body = request.get_json(silent=True) or {}
+    username = (body.get('username') or '').strip()
+    password = body.get('password') or ''
 
-    def api_post(self, parsed):
-        conn = get_conn()
-        body = self._json_body()
+    if not username or len(password) < 6:
+        return jsonify({'error': 'Provide username and password (6+ chars).'}), 400
 
-        if parsed.path == '/api/auth/register':
-            username = (body.get('username') or '').strip()
-            password = body.get('password') or ''
-            if not username or len(password) < 6:
-                return self._send_json({'error': 'Provide username and password (6+ chars).'}, 400)
-            try:
-                cur = conn.execute('INSERT INTO users(username, password_hash) VALUES (?, ?)',
-                                   (username, hash_password(password)))
-                conn.commit()
-            except sqlite3.IntegrityError:
-                return self._send_json({'error': 'Username already exists.'}, 409)
-            sid = secrets.token_urlsafe(24)
-            SESSIONS[sid] = cur.lastrowid
-            return self._send_json({'id': cur.lastrowid, 'username': username}, extra_headers={
-                'Set-Cookie': f'sid={sid}; Path=/; HttpOnly; SameSite=Lax'
-            })
+    with db.connect() as conn:
+        cur = conn.cursor()
+        try:
+            if db.is_postgres:
+                cur.execute(
+                    'INSERT INTO users(username, password_hash) VALUES (%s, %s) RETURNING id',
+                    (username, hash_password(password))
+                )
+                user_id = cur.fetchone()['id']
+            else:
+                cur.execute('INSERT INTO users(username, password_hash) VALUES (?, ?)',
+                            (username, hash_password(password)))
+                user_id = cur.lastrowid
+            conn.commit()
+        except Exception as exc:
+            if 'UNIQUE' in str(exc).upper() or 'duplicate key' in str(exc).lower():
+                return jsonify({'error': 'Username already exists.'}), 409
+            raise
 
-        if parsed.path == '/api/auth/login':
-            username = (body.get('username') or '').strip()
-            password = body.get('password') or ''
-            user = conn.execute('SELECT id, username, password_hash FROM users WHERE username = ?', (username,)).fetchone()
-            if not user or not verify_password(password, user['password_hash']):
-                return self._send_json({'error': 'Invalid credentials.'}, 401)
-            sid = secrets.token_urlsafe(24)
-            SESSIONS[sid] = user['id']
-            return self._send_json({'id': user['id'], 'username': user['username']}, extra_headers={
-                'Set-Cookie': f'sid={sid}; Path=/; HttpOnly; SameSite=Lax'
-            })
+    session['user_id'] = user_id
+    return jsonify({'id': user_id, 'username': username})
 
-        if parsed.path == '/api/auth/logout':
-            sid, _ = self._session()
-            if sid and sid in SESSIONS:
-                del SESSIONS[sid]
-            return self._send_json({'ok': True}, extra_headers={
-                'Set-Cookie': 'sid=deleted; Path=/; Max-Age=0; HttpOnly; SameSite=Lax'
-            })
 
-        user_id = self._require_user()
-        if not user_id:
-            return self._send_json({'error': 'Unauthorized'}, 401)
+@app.post('/api/auth/login')
+def login():
+    init_db()
+    body = request.get_json(silent=True) or {}
+    username = (body.get('username') or '').strip()
+    password = body.get('password') or ''
 
-        if parsed.path == '/api/completions':
-            week = body.get('weekStart')
-            task_id = body.get('taskId')
-            completed = body.get('completed')
-            if not week or not isinstance(task_id, int) or not isinstance(completed, bool):
-                return self._send_json({'error': 'Invalid payload'}, 400)
-            conn.execute('''
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT id, username, password_hash FROM users WHERE username = ?'), (username,))
+        user = cur.fetchone()
+
+    if not user or not verify_password(password, user['password_hash']):
+        return jsonify({'error': 'Invalid credentials.'}), 401
+
+    session['user_id'] = user['id']
+    return jsonify({'id': user['id'], 'username': user['username']})
+
+
+@app.post('/api/auth/logout')
+def logout():
+    session.pop('user_id', None)
+    return jsonify({'ok': True})
+
+
+@app.post('/api/completions')
+def set_completion():
+    init_db()
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    body = request.get_json(silent=True) or {}
+    week = body.get('weekStart')
+    task_id = body.get('taskId')
+    completed = body.get('completed')
+
+    if not week or not isinstance(task_id, int) or not isinstance(completed, bool):
+        return jsonify({'error': 'Invalid payload'}), 400
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('''
             INSERT INTO completions(user_id, task_id, week_start, completed, updated_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id, task_id, week_start)
             DO UPDATE SET completed=excluded.completed, updated_at=excluded.updated_at
-            ''', (user_id, task_id, week, int(completed), datetime.utcnow().isoformat()))
-            conn.commit()
-            return self._send_json({'ok': True})
+        '''), (user_id, task_id, week, int(completed), datetime.utcnow().isoformat()))
+        conn.commit()
 
-        return self._send_json({'error': 'Not found'}, 404)
+    return jsonify({'ok': True})
+
+
+@app.get('/')
+def root_index():
+    return send_from_directory(PUBLIC_DIR, 'index.html')
+
+
+@app.get('/<path:path>')
+def static_files(path):
+    file_path = PUBLIC_DIR / path
+    if file_path.exists() and file_path.is_file():
+        return send_from_directory(PUBLIC_DIR, path)
+    return send_from_directory(PUBLIC_DIR, 'index.html')
 
 
 def main():
+    parsed = urlparse(DATABASE_URL)
+    if DATABASE_URL and parsed.scheme.startswith('postgres'):
+        print('Using Postgres database (e.g., Neon).')
+    else:
+        print(f'Using SQLite database at {DB_PATH}.')
+
     init_db()
     port = int(os.environ.get('PORT', '3000'))
-    server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'Cleaning Listx running on http://localhost:{port}')
-    server.serve_forever()
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 
 if __name__ == '__main__':
