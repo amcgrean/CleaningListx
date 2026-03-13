@@ -1,7 +1,6 @@
 const authCard = document.getElementById('auth-card');
 const schedule = document.getElementById('schedule');
 const authForm = document.getElementById('auth-form');
-const authMessage = document.getElementById('auth-message');
 const weekLabel = document.getElementById('week-label');
 const weeklyGrid = document.getElementById('weekly-grid');
 const monthlyList = document.getElementById('monthly-list');
@@ -12,6 +11,16 @@ const whoami = document.getElementById('whoami');
 let tasks = [];
 let completions = {};
 let currentWeekStart = getWeekStart(new Date());
+let authProvider = 'local';
+
+function getStoredToken() {
+  return localStorage.getItem('neonAuthToken') || '';
+}
+
+function setStoredToken(token) {
+  if (token) localStorage.setItem('neonAuthToken', token);
+  else localStorage.removeItem('neonAuthToken');
+}
 
 function getWeekStart(date) {
   const d = new Date(date);
@@ -33,9 +42,13 @@ function weekLabelText(start) {
 }
 
 async function api(url, options = {}) {
+  const token = getStoredToken();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const response = await fetch(url, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+    headers
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Request failed');
@@ -129,6 +142,22 @@ async function toggleCompletion(taskId, completed) {
   });
 }
 
+function authMessageEl() {
+  return document.getElementById('auth-message');
+}
+
+function setNeonAuthMode() {
+  authForm.innerHTML = `
+    <label>
+      Neon access token (JWT)
+      <input id="token-input" name="token" required placeholder="Paste Neon JWT" />
+    </label>
+    <div class="auth-actions">
+      <button type="button" data-mode="token-login">Continue</button>
+    </div>
+    <p id="auth-message"></p>`;
+}
+
 document.addEventListener('change', async (event) => {
   const input = event.target;
   if (!(input instanceof HTMLInputElement) || input.type !== 'checkbox' || !input.dataset.id) return;
@@ -147,6 +176,30 @@ authForm.addEventListener('click', async (event) => {
   const button = event.target;
   if (!(button instanceof HTMLButtonElement) || !button.dataset.mode) return;
 
+  if (button.dataset.mode === 'token-login') {
+    const tokenInput = document.getElementById('token-input');
+    if (!(tokenInput instanceof HTMLInputElement) || !tokenInput.value.trim()) {
+      authMessageEl().textContent = 'Provide a Neon JWT.';
+      return;
+    }
+
+    setStoredToken(tokenInput.value.trim());
+    try {
+      const me = await api('/api/auth/me');
+      if (!me.user) throw new Error('Invalid token.');
+      whoami.textContent = me.user.username;
+      authCard.classList.add('hidden');
+      schedule.classList.remove('hidden');
+      tasks = (await api('/api/tasks')).tasks;
+      await loadCompletionsAndRender();
+      authMessageEl().textContent = '';
+    } catch (error) {
+      setStoredToken('');
+      authMessageEl().textContent = error.message;
+    }
+    return;
+  }
+
   const formData = new FormData(authForm);
   const payload = {
     username: formData.get('username'),
@@ -162,11 +215,18 @@ authForm.addEventListener('click', async (event) => {
     tasks = (await api('/api/tasks')).tasks;
     await loadCompletionsAndRender();
   } catch (error) {
-    authMessage.textContent = error.message;
+    authMessageEl().textContent = error.message;
   }
 });
 
 async function bootstrap() {
+  const cfg = await api('/api/auth/config');
+  authProvider = cfg.provider;
+
+  if (authProvider === 'neon') {
+    setNeonAuthMode();
+  }
+
   const me = await api('/api/auth/me');
   if (!me.user) return;
 
@@ -190,10 +250,16 @@ document.getElementById('next-week').addEventListener('click', async () => {
 });
 
 document.getElementById('logout').addEventListener('click', async () => {
+  if (authProvider === 'neon') {
+    setStoredToken('');
+    location.reload();
+    return;
+  }
+
   await api('/api/auth/logout', { method: 'POST' });
   location.reload();
 });
 
 bootstrap().catch((error) => {
-  authMessage.textContent = error.message;
+  authMessageEl().textContent = error.message;
 });

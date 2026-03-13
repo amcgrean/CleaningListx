@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request, send_from_directory, session
+import jwt
 
 try:
     import psycopg
@@ -19,6 +20,9 @@ ROOT = Path(__file__).parent
 PUBLIC_DIR = ROOT / 'public'
 DB_PATH = ROOT / 'cleaning.db'
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
+NEON_AUTH_ISSUER = os.environ.get('NEON_AUTH_ISSUER', '')
+NEON_AUTH_AUDIENCE = os.environ.get('NEON_AUTH_AUDIENCE', '')
+NEON_AUTH_JWKS_URL = os.environ.get('NEON_AUTH_JWKS_URL', '')
 
 WEEKLY_SECTIONS = {
     'Daily': [
@@ -89,6 +93,77 @@ class DB:
 
 db = DB()
 _db_initialized = False
+_jwks_client = None
+
+
+def neon_auth_enabled():
+    return bool(NEON_AUTH_ISSUER and NEON_AUTH_JWKS_URL)
+
+
+def get_jwks_client():
+    global _jwks_client
+    if _jwks_client is None:
+        _jwks_client = jwt.PyJWKClient(NEON_AUTH_JWKS_URL)
+    return _jwks_client
+
+
+def extract_neon_user():
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.lower().startswith('bearer '):
+        return None
+
+    token = auth_header.split(' ', 1)[1].strip()
+    if not token:
+        return None
+
+    try:
+        signing_key = get_jwks_client().get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=['RS256'],
+            issuer=NEON_AUTH_ISSUER,
+            audience=NEON_AUTH_AUDIENCE or None,
+            options={'verify_aud': bool(NEON_AUTH_AUDIENCE)}
+        )
+    except Exception:
+        return None
+
+    return {
+        'external_id': payload.get('sub'),
+        'username': payload.get('email') or payload.get('preferred_username') or payload.get('sub')
+    }
+
+
+def current_user_id():
+    if not neon_auth_enabled():
+        return session.get('user_id')
+
+    neon_user = extract_neon_user()
+    if not neon_user or not neon_user['external_id']:
+        return None
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT id FROM users WHERE external_id = ?'), (neon_user['external_id'],))
+        row = cur.fetchone()
+        if row:
+            return row['id']
+
+        if db.is_postgres:
+            cur.execute(
+                'INSERT INTO users(username, password_hash, external_id) VALUES (%s, %s, %s) RETURNING id',
+                (neon_user['username'], '', neon_user['external_id'])
+            )
+            user_id = cur.fetchone()['id']
+        else:
+            cur.execute(
+                'INSERT INTO users(username, password_hash, external_id) VALUES (?, ?, ?)',
+                (neon_user['username'], '', neon_user['external_id'])
+            )
+            user_id = cur.lastrowid
+        conn.commit()
+        return user_id
 
 
 def hash_password(password, salt=None):
@@ -114,6 +189,7 @@ def init_db():
               id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
               username TEXT UNIQUE NOT NULL,
               password_hash TEXT NOT NULL,
+              external_id TEXT UNIQUE,
               created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''' if db.is_postgres else '''
@@ -121,9 +197,18 @@ def init_db():
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               username TEXT UNIQUE NOT NULL,
               password_hash TEXT NOT NULL,
+              external_id TEXT UNIQUE,
               created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        if db.is_postgres:
+            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS external_id TEXT UNIQUE')
+        else:
+            cur.execute('PRAGMA table_info(users)')
+            columns = [r['name'] for r in cur.fetchall()]
+            if 'external_id' not in columns:
+                cur.execute('ALTER TABLE users ADD COLUMN external_id TEXT')
         cur.execute('''
             CREATE TABLE IF NOT EXISTS tasks (
               id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
@@ -191,7 +276,7 @@ app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-me')
 @app.get('/api/auth/me')
 def auth_me():
     init_db()
-    user_id = session.get('user_id')
+    user_id = current_user_id()
     if not user_id:
         return jsonify({'user': None})
 
@@ -205,7 +290,7 @@ def auth_me():
 @app.get('/api/tasks')
 def get_tasks():
     init_db()
-    user_id = session.get('user_id')
+    user_id = current_user_id()
     if not user_id:
         return jsonify({'error': 'Unauthorized'}), 401
 
@@ -219,7 +304,7 @@ def get_tasks():
 @app.get('/api/completions')
 def get_completions():
     init_db()
-    user_id = session.get('user_id')
+    user_id = current_user_id()
     if not user_id:
         return jsonify({'error': 'Unauthorized'}), 401
 
@@ -237,6 +322,8 @@ def get_completions():
 @app.post('/api/auth/register')
 def register():
     init_db()
+    if neon_auth_enabled():
+        return jsonify({'error': 'Registration is managed by Neon Auth.'}), 400
     body = request.get_json(silent=True) or {}
     username = (body.get('username') or '').strip()
     password = body.get('password') or ''
@@ -270,6 +357,8 @@ def register():
 @app.post('/api/auth/login')
 def login():
     init_db()
+    if neon_auth_enabled():
+        return jsonify({'error': 'Login is managed by Neon Auth. Include a Bearer token in API requests.'}), 400
     body = request.get_json(silent=True) or {}
     username = (body.get('username') or '').strip()
     password = body.get('password') or ''
@@ -288,14 +377,21 @@ def login():
 
 @app.post('/api/auth/logout')
 def logout():
+    if neon_auth_enabled():
+        return jsonify({'ok': True})
     session.pop('user_id', None)
     return jsonify({'ok': True})
+
+
+@app.get('/api/auth/config')
+def auth_config():
+    return jsonify({'provider': 'neon' if neon_auth_enabled() else 'local'})
 
 
 @app.post('/api/completions')
 def set_completion():
     init_db()
-    user_id = session.get('user_id')
+    user_id = current_user_id()
     if not user_id:
         return jsonify({'error': 'Unauthorized'}), 401
 
