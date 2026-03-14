@@ -12,6 +12,7 @@ let tasks = [];
 let completions = {};
 let currentWeekStart = getWeekStart(new Date());
 let authProvider = 'local';
+const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 function getStoredToken() {
   return localStorage.getItem('neonAuthToken') || '';
@@ -59,8 +60,20 @@ function taskChecked(taskId) {
   return Boolean(completions[taskId]);
 }
 
+function getDefaultOpenSections() {
+  const today = weekdayNames[new Date().getDay()];
+  return new Set(['Daily', today]);
+}
+
+function setDayCardExpanded(card, expanded) {
+  card.classList.toggle('is-collapsed', !expanded);
+  const toggle = card.querySelector('.day-toggle');
+  if (toggle) toggle.setAttribute('aria-expanded', String(expanded));
+}
+
 function renderWeekly() {
   const order = ['Daily', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const defaultOpenSections = getDefaultOpenSections();
   weeklyGrid.innerHTML = '';
   order.forEach((section) => {
     const sectionTasks = tasks.filter((t) => t.section === section);
@@ -69,7 +82,11 @@ function renderWeekly() {
     const card = document.createElement('article');
     card.className = 'day-card';
     card.dataset.theme = section;
-    card.innerHTML = `<div class="day-title">${section}</div>`;
+    card.innerHTML = `
+      <button type="button" class="day-toggle" aria-expanded="false">${section}</button>
+      <div class="day-tasks"></div>`;
+
+    const tasksContainer = card.querySelector('.day-tasks');
 
     sectionTasks.forEach((task) => {
       const row = document.createElement('label');
@@ -77,8 +94,11 @@ function renderWeekly() {
       row.innerHTML = `
         <span>${task.label}</span>
         <input type="checkbox" ${taskChecked(task.id) ? 'checked' : ''} data-id="${task.id}" />`;
-      card.appendChild(row);
+      tasksContainer.appendChild(row);
     });
+
+    const expandedByDefault = defaultOpenSections.has(section);
+    setDayCardExpanded(card, expandedByDefault);
 
     weeklyGrid.appendChild(card);
   });
@@ -170,6 +190,16 @@ document.addEventListener('change', async (event) => {
     completions[id] = input.checked;
     alert(error.message);
   }
+});
+
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement) || !target.classList.contains('day-toggle')) return;
+
+  const card = target.closest('.day-card');
+  if (!card) return;
+  const isExpanded = target.getAttribute('aria-expanded') === 'true';
+  setDayCardExpanded(card, !isExpanded);
 });
 
 authForm.addEventListener('click', async (event) => {
