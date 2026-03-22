@@ -73,6 +73,19 @@ ANNUAL = [
     ('N', 'Wash Windows'), ('D', 'Inspect and Replace Batteries')
 ]
 
+VALID_SECTIONS = (
+    ['Daily', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', 'Monthly'] +
+    [f'Annual {i}' for i in range(1, 13)]
+)
+
+
+def get_frequency_for_section(section):
+    if section.startswith('Annual'):
+        return 'annual'
+    if section == 'Monthly':
+        return 'monthly'
+    return 'weekly'
+
 
 class DB:
     def __init__(self):
@@ -296,8 +309,19 @@ def init_db():
                             ('Monthly', 'monthly', label, idx))
             for idx, (month, label) in enumerate(ANNUAL):
                 cur.execute(db.q('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)'),
-                            (f'Annual {month}', 'annual', label, idx))
+                            (f'Annual {idx + 1}', 'annual', label, idx))
         conn.commit()
+
+        # Migrate annual sections from letter format (e.g. "Annual J") to number format (e.g. "Annual 1")
+        cur.execute(db.q("SELECT id, section, sort_order FROM tasks WHERE frequency = 'annual' ORDER BY sort_order"))
+        annual_rows = cur.fetchall()
+        needs_migration = any(not row['section'].replace('Annual ', '').isdigit() for row in annual_rows)
+        if needs_migration:
+            for row in annual_rows:
+                if not row['section'].replace('Annual ', '').isdigit():
+                    month_num = min(max(row['sort_order'] + 1, 1), 12)
+                    cur.execute(db.q('UPDATE tasks SET section = ? WHERE id = ?'), (f'Annual {month_num}', row['id']))
+            conn.commit()
 
     _db_initialized = True
 
@@ -634,6 +658,126 @@ def get_household_completions():
             completions_by_task[tid][uid] = bool(row['completed'])
 
     return jsonify({'members': members, 'completions': completions_by_task})
+
+
+@app.post('/api/tasks')
+def create_task():
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    body = request.get_json(silent=True) or {}
+    section = (body.get('section') or '').strip()
+    label = (body.get('label') or '').strip()
+
+    if not section or not label:
+        return jsonify({'error': 'section and label required'}), 400
+    if section not in VALID_SECTIONS:
+        return jsonify({'error': 'Invalid section'}), 400
+
+    frequency = get_frequency_for_section(section)
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM tasks WHERE section = ?'), (section,))
+        row = cur.fetchone()
+        next_order = row['next_order']
+
+        if db.is_postgres:
+            cur.execute(
+                'INSERT INTO tasks(section, frequency, label, sort_order) VALUES (%s, %s, %s, %s) RETURNING id',
+                (section, frequency, label, next_order)
+            )
+            task_id = cur.fetchone()['id']
+        else:
+            cur.execute(db.q('INSERT INTO tasks(section, frequency, label, sort_order) VALUES (?, ?, ?, ?)'),
+                        (section, frequency, label, next_order))
+            task_id = cur.lastrowid
+        conn.commit()
+
+    return jsonify({'id': task_id, 'section': section, 'frequency': frequency, 'label': label, 'sort_order': next_order})
+
+
+@app.put('/api/tasks/<int:task_id>')
+def update_task(task_id):
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    body = request.get_json(silent=True) or {}
+    label = (body.get('label') or '').strip()
+    section = (body.get('section') or '').strip()
+
+    if not label or not section:
+        return jsonify({'error': 'label and section required'}), 400
+    if section not in VALID_SECTIONS:
+        return jsonify({'error': 'Invalid section'}), 400
+
+    frequency = get_frequency_for_section(section)
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT section, sort_order FROM tasks WHERE id = ?'), (task_id,))
+        existing = cur.fetchone()
+        if not existing:
+            return jsonify({'error': 'Task not found'}), 404
+
+        new_sort_order = existing['sort_order']
+        if section != existing['section']:
+            cur.execute(db.q('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM tasks WHERE section = ?'), (section,))
+            row = cur.fetchone()
+            new_sort_order = row['next_order']
+
+        cur.execute(db.q('UPDATE tasks SET label = ?, section = ?, frequency = ?, sort_order = ? WHERE id = ?'),
+                    (label, section, frequency, new_sort_order, task_id))
+        conn.commit()
+
+    return jsonify({'ok': True})
+
+
+@app.delete('/api/tasks/<int:task_id>')
+def delete_task(task_id):
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('DELETE FROM completions WHERE task_id = ?'), (task_id,))
+        cur.execute(db.q('DELETE FROM tasks WHERE id = ?'), (task_id,))
+        conn.commit()
+
+    return jsonify({'ok': True})
+
+
+@app.post('/api/tasks/reorder')
+def reorder_tasks():
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    body = request.get_json(silent=True) or {}
+    items = body.get('items') or []
+    if not isinstance(items, list):
+        return jsonify({'error': 'items must be a list'}), 400
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get('id')
+            item_order = item.get('sort_order')
+            if not isinstance(item_id, int) or not isinstance(item_order, int):
+                continue
+            cur.execute(db.q('UPDATE tasks SET sort_order = ? WHERE id = ?'), (item_order, item_id))
+        conn.commit()
+
+    return jsonify({'ok': True})
 
 
 @app.get('/')

@@ -8,6 +8,7 @@ const annualList = document.getElementById('annual-list');
 const monthTrack = document.getElementById('month-track');
 const whoami = document.getElementById('whoami');
 const householdPanel = document.getElementById('household-panel');
+const settingsPanel = document.getElementById('settings-panel');
 
 let tasks = [];
 let completions = {};
@@ -16,8 +17,12 @@ let authProvider = 'local';
 let household = null;
 let householdCompletions = {};
 let householdMembers = [];
+let settingsActiveTab = 'weekly';
 const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MEMBER_COLORS = ['#e07a5f', '#81b29a', '#6d6875', '#f2cc8f', '#b5838d', '#3d405b', '#a8dadc'];
+const MONTH_LETTERS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const WEEKLY_SECTION_ORDER = ['Daily', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 function getStoredToken() {
   return localStorage.getItem('neonAuthToken') || '';
@@ -96,7 +101,7 @@ function renderWeekly() {
   const defaultOpenSections = getDefaultOpenSections();
   weeklyGrid.innerHTML = '';
   order.forEach((section) => {
-    const sectionTasks = tasks.filter((t) => t.section === section);
+    const sectionTasks = tasks.filter((t) => t.section === section).sort((a, b) => a.sort_order - b.sort_order);
     if (!sectionTasks.length) return;
 
     const card = document.createElement('article');
@@ -129,6 +134,7 @@ function renderMonthly() {
   monthlyList.innerHTML = '';
   tasks
     .filter((t) => t.frequency === 'monthly')
+    .sort((a, b) => a.sort_order - b.sort_order)
     .forEach((task) => {
       const row = document.createElement('label');
       row.className = 'month-row';
@@ -141,10 +147,14 @@ function renderAnnual() {
   annualList.innerHTML = '';
   tasks
     .filter((t) => t.frequency === 'annual')
+    .sort((a, b) => a.sort_order - b.sort_order)
     .forEach((task) => {
       const row = document.createElement('label');
       row.className = 'annual-row';
-      const marker = task.section.replace('Annual ', '');
+      const monthNum = parseInt(task.section.replace('Annual ', ''), 10);
+      const marker = (!isNaN(monthNum) && monthNum >= 1 && monthNum <= 12)
+        ? MONTH_LETTERS[monthNum - 1]
+        : task.section.replace('Annual ', '');
       row.innerHTML = `<span><strong>${marker}</strong> ${task.label}</span><span class="task-avatars">${renderMemberAvatars(task.id)}</span><input type="checkbox" ${taskChecked(task.id) ? 'checked' : ''} data-id="${task.id}"/>`;
       annualList.appendChild(row);
     });
@@ -192,6 +202,262 @@ async function toggleCompletion(taskId, completed) {
     body: JSON.stringify({ weekStart: formatWeek(currentWeekStart), taskId, completed })
   });
 }
+
+// --- Helpers ---
+
+function esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function getFrequency(section) {
+  if (section.startsWith('Annual')) return 'annual';
+  if (section === 'Monthly') return 'monthly';
+  return 'weekly';
+}
+
+// --- Settings panel ---
+
+function allSectionsOptions(currentSection) {
+  const weekly = WEEKLY_SECTION_ORDER;
+  const annual = Array.from({ length: 12 }, (_, i) => `Annual ${i + 1}`);
+  const sections = [...weekly, 'Monthly', ...annual];
+  return sections.map((s) => {
+    let label = s;
+    if (s.startsWith('Annual ')) {
+      const n = parseInt(s.replace('Annual ', ''), 10);
+      label = (n >= 1 && n <= 12) ? MONTH_NAMES[n - 1] : s;
+    }
+    return `<option value="${esc(s)}"${s === currentSection ? ' selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+}
+
+function renderSettingsTaskRow(task, idx, total) {
+  return `
+    <div class="settings-task-row" data-task-id="${task.id}">
+      <button class="move-btn move-up" title="Move up"${idx === 0 ? ' disabled' : ''}>▲</button>
+      <button class="move-btn move-down" title="Move down"${idx === total - 1 ? ' disabled' : ''}>▼</button>
+      <input type="text" class="task-label-input" value="${esc(task.label)}" />
+      <select class="task-section-select" title="Change section">${allSectionsOptions(task.section)}</select>
+      <button class="delete-task-btn" title="Delete task">✕</button>
+    </div>`;
+}
+
+function renderSettingsSection(section, headerLabel) {
+  const sectionTasks = tasks.filter((t) => t.section === section).sort((a, b) => a.sort_order - b.sort_order);
+  const rows = sectionTasks.map((task, idx) => renderSettingsTaskRow(task, idx, sectionTasks.length)).join('');
+  const placeholder = section.startsWith('Annual ')
+    ? `Add task for ${allSectionsOptions(section).match(/selected[^>]*>([^<]+)/)?.[1] || section}...`
+    : `Add task to ${section}...`;
+  return `
+    <div class="settings-section">
+      <div class="settings-section-header">${esc(headerLabel)}</div>
+      <div class="settings-task-list">${rows}</div>
+      <div class="add-task-row">
+        <input type="text" class="new-task-input" placeholder="${esc('New task name...')}" data-section="${esc(section)}" />
+        <button class="add-task-btn" data-section="${esc(section)}">Add</button>
+      </div>
+    </div>`;
+}
+
+function renderSettingsContent() {
+  if (settingsActiveTab === 'weekly') {
+    return WEEKLY_SECTION_ORDER.map((s) => renderSettingsSection(s, s)).join('');
+  }
+  if (settingsActiveTab === 'monthly') {
+    return renderSettingsSection('Monthly', 'Monthly Tasks');
+  }
+  // annual
+  return Array.from({ length: 12 }, (_, i) => {
+    const section = `Annual ${i + 1}`;
+    const label = MONTH_NAMES[i];
+    return renderSettingsSection(section, label);
+  }).join('');
+}
+
+function renderSettings() {
+  settingsPanel.innerHTML = `
+    <div class="settings-inner">
+      <div class="settings-header">
+        <h3>Task Settings</h3>
+        <button id="settings-close-btn" class="secondary">Close</button>
+      </div>
+      <div class="settings-tabs">
+        <button class="settings-tab${settingsActiveTab === 'weekly' ? ' active' : ''}" data-tab="weekly">Weekly</button>
+        <button class="settings-tab${settingsActiveTab === 'monthly' ? ' active' : ''}" data-tab="monthly">Monthly</button>
+        <button class="settings-tab${settingsActiveTab === 'annual' ? ' active' : ''}" data-tab="annual">Annual</button>
+      </div>
+      <div class="settings-content">${renderSettingsContent()}</div>
+      <p class="settings-msg" id="settings-msg"></p>
+    </div>`;
+}
+
+function settingsMsg(text) {
+  const el = document.getElementById('settings-msg');
+  if (el) el.textContent = text;
+}
+
+async function settingsAddTask(section) {
+  const input = settingsPanel.querySelector(`.new-task-input[data-section="${CSS.escape(section)}"]`);
+  if (!(input instanceof HTMLInputElement)) return;
+  const label = input.value.trim();
+  if (!label) { settingsMsg('Please enter a task name.'); return; }
+  try {
+    const newTask = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ section, label }) });
+    tasks.push(newTask);
+    input.value = '';
+    renderSettings();
+    renderWeekly(); renderMonthly(); renderAnnual();
+  } catch (err) {
+    settingsMsg(err.message);
+  }
+}
+
+async function settingsDeleteTask(taskId) {
+  if (!confirm('Delete this task? All completion history for it will also be removed.')) return;
+  try {
+    await api(`/api/tasks/${taskId}`, { method: 'DELETE' });
+    tasks = tasks.filter((t) => t.id !== taskId);
+    delete completions[taskId];
+    renderSettings();
+    renderWeekly(); renderMonthly(); renderAnnual();
+  } catch (err) {
+    settingsMsg(err.message);
+  }
+}
+
+async function settingsMoveTask(taskId, direction) {
+  const task = tasks.find((t) => t.id === taskId);
+  if (!task) return;
+  const sectionTasks = tasks.filter((t) => t.section === task.section).sort((a, b) => a.sort_order - b.sort_order);
+  const idx = sectionTasks.findIndex((t) => t.id === taskId);
+  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= sectionTasks.length) return;
+  const other = sectionTasks[swapIdx];
+  const updates = [
+    { id: task.id, sort_order: other.sort_order },
+    { id: other.id, sort_order: task.sort_order }
+  ];
+  try {
+    await api('/api/tasks/reorder', { method: 'POST', body: JSON.stringify({ items: updates }) });
+    const taskObj = tasks.find((t) => t.id === task.id);
+    const otherObj = tasks.find((t) => t.id === other.id);
+    const tmp = taskObj.sort_order;
+    taskObj.sort_order = otherObj.sort_order;
+    otherObj.sort_order = tmp;
+    renderSettings();
+    renderWeekly(); renderMonthly(); renderAnnual();
+  } catch (err) {
+    settingsMsg(err.message);
+  }
+}
+
+async function settingsSaveLabel(taskId, newLabel) {
+  const task = tasks.find((t) => t.id === taskId);
+  if (!task || !newLabel || newLabel === task.label) return;
+  try {
+    await api(`/api/tasks/${taskId}`, { method: 'PUT', body: JSON.stringify({ label: newLabel, section: task.section }) });
+    task.label = newLabel;
+    renderWeekly(); renderMonthly(); renderAnnual();
+  } catch (err) {
+    settingsMsg(err.message);
+    // Revert input
+    const input = settingsPanel.querySelector(`.settings-task-row[data-task-id="${taskId}"] .task-label-input`);
+    if (input instanceof HTMLInputElement) input.value = task.label;
+  }
+}
+
+async function settingsChangeSection(taskId, newSection) {
+  const task = tasks.find((t) => t.id === taskId);
+  if (!task || newSection === task.section) return;
+  try {
+    await api(`/api/tasks/${taskId}`, { method: 'PUT', body: JSON.stringify({ label: task.label, section: newSection }) });
+    // Reload tasks to get updated sort_orders
+    tasks = (await api('/api/tasks')).tasks;
+    renderSettings();
+    renderWeekly(); renderMonthly(); renderAnnual();
+  } catch (err) {
+    settingsMsg(err.message);
+    const sel = settingsPanel.querySelector(`.settings-task-row[data-task-id="${taskId}"] .task-section-select`);
+    if (sel instanceof HTMLSelectElement) sel.value = task.section;
+  }
+}
+
+settingsPanel.addEventListener('click', async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+
+  if (target.id === 'settings-close-btn') {
+    settingsPanel.classList.add('hidden');
+    return;
+  }
+
+  if (target.classList.contains('settings-tab') && target.dataset.tab) {
+    settingsActiveTab = target.dataset.tab;
+    renderSettings();
+    return;
+  }
+
+  if (target.classList.contains('add-task-btn') && target.dataset.section) {
+    await settingsAddTask(target.dataset.section);
+    return;
+  }
+
+  if (target.classList.contains('delete-task-btn')) {
+    const row = target.closest('.settings-task-row');
+    if (row) await settingsDeleteTask(Number(row.dataset.taskId));
+    return;
+  }
+
+  if (target.classList.contains('move-up')) {
+    const row = target.closest('.settings-task-row');
+    if (row) await settingsMoveTask(Number(row.dataset.taskId), 'up');
+    return;
+  }
+
+  if (target.classList.contains('move-down')) {
+    const row = target.closest('.settings-task-row');
+    if (row) await settingsMoveTask(Number(row.dataset.taskId), 'down');
+    return;
+  }
+});
+
+settingsPanel.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  const target = event.target;
+  if (target instanceof HTMLInputElement && target.classList.contains('new-task-input') && target.dataset.section) {
+    settingsAddTask(target.dataset.section);
+  }
+  if (target instanceof HTMLInputElement && target.classList.contains('task-label-input')) {
+    target.blur();
+  }
+});
+
+settingsPanel.addEventListener('focusout', async (event) => {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || !input.classList.contains('task-label-input')) return;
+  const row = input.closest('.settings-task-row');
+  if (!row) return;
+  await settingsSaveLabel(Number(row.dataset.taskId), input.value.trim());
+});
+
+settingsPanel.addEventListener('change', async (event) => {
+  const select = event.target;
+  if (!(select instanceof HTMLSelectElement) || !select.classList.contains('task-section-select')) return;
+  const row = select.closest('.settings-task-row');
+  if (!row) return;
+  await settingsChangeSection(Number(row.dataset.taskId), select.value);
+});
+
+document.getElementById('settings-btn').addEventListener('click', () => {
+  settingsPanel.classList.toggle('hidden');
+  if (!settingsPanel.classList.contains('hidden')) {
+    renderSettings();
+  }
+});
 
 // --- Household panel ---
 
