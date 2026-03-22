@@ -7,12 +7,17 @@ const monthlyList = document.getElementById('monthly-list');
 const annualList = document.getElementById('annual-list');
 const monthTrack = document.getElementById('month-track');
 const whoami = document.getElementById('whoami');
+const householdPanel = document.getElementById('household-panel');
 
 let tasks = [];
 let completions = {};
 let currentWeekStart = getWeekStart(new Date());
 let authProvider = 'local';
+let household = null;
+let householdCompletions = {};
+let householdMembers = [];
 const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MEMBER_COLORS = ['#e07a5f', '#81b29a', '#6d6875', '#f2cc8f', '#b5838d', '#3d405b', '#a8dadc'];
 
 function getStoredToken() {
   return localStorage.getItem('neonAuthToken') || '';
@@ -60,6 +65,21 @@ function taskChecked(taskId) {
   return Boolean(completions[taskId]);
 }
 
+function getMemberColor(index) {
+  return MEMBER_COLORS[index % MEMBER_COLORS.length];
+}
+
+function renderMemberAvatars(taskId) {
+  if (!household || householdMembers.length <= 1) return '';
+  const taskComp = householdCompletions[taskId] || {};
+  return householdMembers.map((member, idx) => {
+    const done = Boolean(taskComp[member.id]);
+    const color = getMemberColor(idx);
+    const initial = (member.username[0] || '?').toUpperCase();
+    return `<span class="member-avatar${done ? ' done' : ''}" title="${member.username}: ${done ? 'done' : 'not done'}" style="--avatar-color:${color}">${initial}</span>`;
+  }).join('');
+}
+
 function getDefaultOpenSections() {
   const today = weekdayNames[new Date().getDay()];
   return new Set(['Daily', today]);
@@ -93,6 +113,7 @@ function renderWeekly() {
       row.className = 'task-row';
       row.innerHTML = `
         <span>${task.label}</span>
+        <span class="task-avatars">${renderMemberAvatars(task.id)}</span>
         <input type="checkbox" ${taskChecked(task.id) ? 'checked' : ''} data-id="${task.id}" />`;
       tasksContainer.appendChild(row);
     });
@@ -111,7 +132,7 @@ function renderMonthly() {
     .forEach((task) => {
       const row = document.createElement('label');
       row.className = 'month-row';
-      row.innerHTML = `<span>${task.label}</span><input type="checkbox" ${taskChecked(task.id) ? 'checked' : ''} data-id="${task.id}"/>`;
+      row.innerHTML = `<span>${task.label}</span><span class="task-avatars">${renderMemberAvatars(task.id)}</span><input type="checkbox" ${taskChecked(task.id) ? 'checked' : ''} data-id="${task.id}"/>`;
       monthlyList.appendChild(row);
     });
 }
@@ -124,7 +145,7 @@ function renderAnnual() {
       const row = document.createElement('label');
       row.className = 'annual-row';
       const marker = task.section.replace('Annual ', '');
-      row.innerHTML = `<span><strong>${marker}</strong> ${task.label}</span><input type="checkbox" ${taskChecked(task.id) ? 'checked' : ''} data-id="${task.id}"/>`;
+      row.innerHTML = `<span><strong>${marker}</strong> ${task.label}</span><span class="task-avatars">${renderMemberAvatars(task.id)}</span><input type="checkbox" ${taskChecked(task.id) ? 'checked' : ''} data-id="${task.id}"/>`;
       annualList.appendChild(row);
     });
 }
@@ -149,6 +170,16 @@ async function loadCompletionsAndRender() {
   weekLabel.textContent = weekLabelText(currentWeekStart);
   const data = await api(`/api/completions?weekStart=${weekStart}`);
   completions = data.completions;
+
+  if (household) {
+    const hhData = await api(`/api/household/completions?weekStart=${weekStart}`);
+    householdCompletions = hhData.completions;
+    householdMembers = hhData.members;
+  } else {
+    householdCompletions = {};
+    householdMembers = [];
+  }
+
   renderWeekly();
   renderMonthly();
   renderAnnual();
@@ -161,6 +192,129 @@ async function toggleCompletion(taskId, completed) {
     body: JSON.stringify({ weekStart: formatWeek(currentWeekStart), taskId, completed })
   });
 }
+
+// --- Household panel ---
+
+function renderHouseholdPanel() {
+  if (!household) {
+    householdPanel.innerHTML = `
+      <div class="household-inner">
+        <h3>Family Household</h3>
+        <p class="hh-desc">Create a household to share your cleaning list and track who completed each task.</p>
+        <div class="household-forms">
+          <div class="household-form-block">
+            <h4>Create a household</h4>
+            <label>Name<input id="hh-name" placeholder="e.g. The Smith Family" /></label>
+            <button id="hh-create-btn">Create</button>
+          </div>
+          <div class="household-form-block">
+            <h4>Join a household</h4>
+            <label>Invite code<input id="hh-code" placeholder="Enter 8-character code" /></label>
+            <button id="hh-join-btn">Join</button>
+          </div>
+        </div>
+        <p id="hh-message" class="hh-message"></p>
+      </div>`;
+  } else {
+    const isOwner = household.role === 'owner';
+    const memberList = (household.members || []).map((m, idx) => {
+      const color = getMemberColor(idx);
+      const initial = (m.username[0] || '?').toUpperCase();
+      const badge = m.role === 'owner' ? ' <em>(owner)</em>' : '';
+      return `<li><span class="member-avatar done" style="--avatar-color:${color}">${initial}</span>${m.username}${badge}</li>`;
+    }).join('');
+
+    householdPanel.innerHTML = `
+      <div class="household-inner">
+        <div class="hh-header">
+          <h3>${household.name}</h3>
+          <button id="hh-leave-btn" class="secondary">Leave</button>
+        </div>
+        <ul class="members-list">${memberList}</ul>
+        ${isOwner ? `
+        <div class="invite-code-box">
+          <span>Invite code:</span>
+          <code>${household.invite_code}</code>
+          <button id="hh-copy-btn" class="secondary">Copy</button>
+        </div>
+        <p class="hh-desc">Share this code with family members so they can join.</p>
+        ` : ''}
+        <p id="hh-message" class="hh-message"></p>
+      </div>`;
+  }
+}
+
+function hhMessage(text) {
+  const el = document.getElementById('hh-message');
+  if (el) el.textContent = text;
+}
+
+householdPanel.addEventListener('click', async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) return;
+
+  if (target.id === 'hh-create-btn') {
+    const nameInput = document.getElementById('hh-name');
+    const name = (nameInput instanceof HTMLInputElement ? nameInput.value : '').trim();
+    if (!name) { hhMessage('Please enter a household name.'); return; }
+    try {
+      const result = await api('/api/household/create', { method: 'POST', body: JSON.stringify({ name }) });
+      household = { ...result, members: [{ id: 0, username: whoami.textContent, role: 'owner' }] };
+      const fresh = await api('/api/household');
+      household = fresh.household;
+      renderHouseholdPanel();
+      await loadCompletionsAndRender();
+    } catch (err) {
+      hhMessage(err.message);
+    }
+    return;
+  }
+
+  if (target.id === 'hh-join-btn') {
+    const codeInput = document.getElementById('hh-code');
+    const inviteCode = (codeInput instanceof HTMLInputElement ? codeInput.value : '').trim().toUpperCase();
+    if (!inviteCode) { hhMessage('Please enter an invite code.'); return; }
+    try {
+      await api('/api/household/join', { method: 'POST', body: JSON.stringify({ inviteCode }) });
+      const fresh = await api('/api/household');
+      household = fresh.household;
+      renderHouseholdPanel();
+      await loadCompletionsAndRender();
+    } catch (err) {
+      hhMessage(err.message);
+    }
+    return;
+  }
+
+  if (target.id === 'hh-leave-btn') {
+    if (!confirm('Leave this household?')) return;
+    try {
+      await api('/api/household/leave', { method: 'DELETE' });
+      household = null;
+      householdCompletions = {};
+      householdMembers = [];
+      renderHouseholdPanel();
+      await loadCompletionsAndRender();
+    } catch (err) {
+      hhMessage(err.message);
+    }
+    return;
+  }
+
+  if (target.id === 'hh-copy-btn') {
+    if (household && household.invite_code) {
+      try {
+        await navigator.clipboard.writeText(household.invite_code);
+        target.textContent = 'Copied!';
+        setTimeout(() => { target.textContent = 'Copy'; }, 2000);
+      } catch {
+        hhMessage('Could not copy — invite code: ' + household.invite_code);
+      }
+    }
+  }
+});
+
+// --- Auth form ---
 
 function authMessageEl() {
   return document.getElementById('auth-message');
@@ -183,6 +337,20 @@ document.addEventListener('change', async (event) => {
   if (!(input instanceof HTMLInputElement) || input.type !== 'checkbox' || !input.dataset.id) return;
   const id = Number(input.dataset.id);
   completions[id] = input.checked;
+  // Update household completions optimistically for current user
+  if (household) {
+    const myId = householdMembers.find((m) => m.username === whoami.textContent)?.id;
+    if (myId != null) {
+      if (!householdCompletions[id]) householdCompletions[id] = {};
+      householdCompletions[id][myId] = input.checked;
+      // Re-render just the avatars for this task
+      document.querySelectorAll(`.task-avatars`).forEach((el) => {
+        const row = el.closest('[data-id]') || el.parentElement;
+        const taskId = Number(el.parentElement.querySelector('input[data-id]')?.dataset.id);
+        if (taskId === id) el.innerHTML = renderMemberAvatars(id);
+      });
+    }
+  }
   try {
     await toggleCompletion(id, input.checked);
   } catch (error) {
@@ -200,6 +368,10 @@ document.addEventListener('click', (event) => {
   if (!card) return;
   const isExpanded = target.getAttribute('aria-expanded') === 'true';
   setDayCardExpanded(card, !isExpanded);
+});
+
+document.getElementById('household-btn').addEventListener('click', () => {
+  householdPanel.classList.toggle('hidden');
 });
 
 authForm.addEventListener('click', async (event) => {
@@ -220,6 +392,9 @@ authForm.addEventListener('click', async (event) => {
       whoami.textContent = me.user.username;
       authCard.classList.add('hidden');
       schedule.classList.remove('hidden');
+      const hhData = await api('/api/household');
+      household = hhData.household;
+      renderHouseholdPanel();
       tasks = (await api('/api/tasks')).tasks;
       await loadCompletionsAndRender();
       authMessageEl().textContent = '';
@@ -242,6 +417,9 @@ authForm.addEventListener('click', async (event) => {
     whoami.textContent = sessionData.username;
     authCard.classList.add('hidden');
     schedule.classList.remove('hidden');
+    const hhData = await api('/api/household');
+    household = hhData.household;
+    renderHouseholdPanel();
     tasks = (await api('/api/tasks')).tasks;
     await loadCompletionsAndRender();
   } catch (error) {
@@ -263,6 +441,9 @@ async function bootstrap() {
   whoami.textContent = me.user.username;
   authCard.classList.add('hidden');
   schedule.classList.remove('hidden');
+  const hhData = await api('/api/household');
+  household = hhData.household;
+  renderHouseholdPanel();
   tasks = (await api('/api/tasks')).tasks;
   await loadCompletionsAndRender();
 }

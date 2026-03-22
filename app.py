@@ -250,6 +250,39 @@ def init_db():
             )
         ''')
 
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS households (
+              id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+              name TEXT NOT NULL,
+              invite_code TEXT UNIQUE NOT NULL,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''' if db.is_postgres else '''
+            CREATE TABLE IF NOT EXISTS households (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              invite_code TEXT UNIQUE NOT NULL,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS household_members (
+              id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+              household_id INTEGER NOT NULL,
+              user_id INTEGER NOT NULL UNIQUE,
+              role TEXT NOT NULL DEFAULT 'member',
+              joined_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''' if db.is_postgres else '''
+            CREATE TABLE IF NOT EXISTS household_members (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              household_id INTEGER NOT NULL,
+              user_id INTEGER NOT NULL UNIQUE,
+              role TEXT NOT NULL DEFAULT 'member',
+              joined_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         cur.execute('SELECT COUNT(*) AS count FROM tasks')
         count_row = cur.fetchone()
         count = count_row['count'] if db.is_postgres else count_row[0]
@@ -414,6 +447,193 @@ def set_completion():
         conn.commit()
 
     return jsonify({'ok': True})
+
+
+@app.get('/api/household')
+def get_household():
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('''
+            SELECT h.id, h.name, h.invite_code, hm.role
+            FROM household_members hm
+            JOIN households h ON h.id = hm.household_id
+            WHERE hm.user_id = ?
+        '''), (user_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'household': None})
+
+        household = dict(row)
+        cur.execute(db.q('''
+            SELECT u.id, u.username, hm.role
+            FROM household_members hm
+            JOIN users u ON u.id = hm.user_id
+            WHERE hm.household_id = ?
+            ORDER BY hm.joined_at
+        '''), (household['id'],))
+        household['members'] = [dict(r) for r in cur.fetchall()]
+    return jsonify({'household': household})
+
+
+@app.post('/api/household/create')
+def create_household():
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    body = request.get_json(silent=True) or {}
+    name = (body.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Household name required'}), 400
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT household_id FROM household_members WHERE user_id = ?'), (user_id,))
+        if cur.fetchone():
+            return jsonify({'error': 'You are already in a household. Leave it first.'}), 409
+
+        invite_code = ''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZ23456789') for _ in range(8))
+
+        if db.is_postgres:
+            cur.execute(
+                'INSERT INTO households(name, invite_code) VALUES (%s, %s) RETURNING id',
+                (name, invite_code)
+            )
+            household_id = cur.fetchone()['id']
+        else:
+            cur.execute('INSERT INTO households(name, invite_code) VALUES (?, ?)', (name, invite_code))
+            household_id = cur.lastrowid
+
+        cur.execute(db.q('INSERT INTO household_members(household_id, user_id, role) VALUES (?, ?, ?)'),
+                    (household_id, user_id, 'owner'))
+        conn.commit()
+
+    return jsonify({'id': household_id, 'name': name, 'invite_code': invite_code, 'role': 'owner'})
+
+
+@app.post('/api/household/join')
+def join_household():
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    body = request.get_json(silent=True) or {}
+    invite_code = (body.get('inviteCode') or '').strip().upper()
+    if not invite_code:
+        return jsonify({'error': 'Invite code required'}), 400
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT household_id FROM household_members WHERE user_id = ?'), (user_id,))
+        if cur.fetchone():
+            return jsonify({'error': 'You are already in a household. Leave it first.'}), 409
+
+        cur.execute(db.q('SELECT id, name FROM households WHERE invite_code = ?'), (invite_code,))
+        household = cur.fetchone()
+        if not household:
+            return jsonify({'error': 'Invalid invite code.'}), 404
+
+        cur.execute(db.q('INSERT INTO household_members(household_id, user_id, role) VALUES (?, ?, ?)'),
+                    (household['id'], user_id, 'member'))
+        conn.commit()
+
+    return jsonify({'id': household['id'], 'name': household['name']})
+
+
+@app.delete('/api/household/leave')
+def leave_household():
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT household_id, role FROM household_members WHERE user_id = ?'), (user_id,))
+        member_row = cur.fetchone()
+        if not member_row:
+            return jsonify({'error': 'Not in a household'}), 404
+
+        household_id = member_row['household_id']
+        role = member_row['role']
+
+        cur.execute(db.q('SELECT COUNT(*) AS count FROM household_members WHERE household_id = ?'), (household_id,))
+        count_row = cur.fetchone()
+        count = count_row['count']
+
+        cur.execute(db.q('DELETE FROM household_members WHERE user_id = ?'), (user_id,))
+
+        if count == 1:
+            cur.execute(db.q('DELETE FROM households WHERE id = ?'), (household_id,))
+        elif role == 'owner':
+            cur.execute(db.q('SELECT user_id FROM household_members WHERE household_id = ? LIMIT 1'), (household_id,))
+            next_member = cur.fetchone()
+            if next_member:
+                cur.execute(db.q('UPDATE household_members SET role = ? WHERE user_id = ? AND household_id = ?'),
+                            ('owner', next_member['user_id'], household_id))
+        conn.commit()
+
+    return jsonify({'ok': True})
+
+
+@app.get('/api/household/completions')
+def get_household_completions():
+    init_db()
+    user_id = current_user_id()
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    week = request.args.get('weekStart')
+    if not week:
+        return jsonify({'error': 'weekStart query required'}), 400
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute(db.q('SELECT household_id FROM household_members WHERE user_id = ?'), (user_id,))
+        member_row = cur.fetchone()
+        if not member_row:
+            return jsonify({'members': [], 'completions': {}})
+
+        household_id = member_row['household_id']
+        cur.execute(db.q('''
+            SELECT u.id, u.username
+            FROM household_members hm
+            JOIN users u ON u.id = hm.user_id
+            WHERE hm.household_id = ?
+            ORDER BY hm.joined_at
+        '''), (household_id,))
+        members = [dict(r) for r in cur.fetchall()]
+
+        if not members:
+            return jsonify({'members': [], 'completions': {}})
+
+        member_ids = [m['id'] for m in members]
+        if db.is_postgres:
+            ph = ', '.join(['%s'] * len(member_ids))
+            sql = f'SELECT user_id, task_id, completed FROM completions WHERE user_id IN ({ph}) AND week_start = %s'
+        else:
+            ph = ', '.join(['?'] * len(member_ids))
+            sql = f'SELECT user_id, task_id, completed FROM completions WHERE user_id IN ({ph}) AND week_start = ?'
+
+        cur.execute(sql, member_ids + [week])
+        comp_rows = cur.fetchall()
+
+        completions_by_task = {}
+        for row in comp_rows:
+            tid = row['task_id']
+            uid = row['user_id']
+            if tid not in completions_by_task:
+                completions_by_task[tid] = {}
+            completions_by_task[tid][uid] = bool(row['completed'])
+
+    return jsonify({'members': members, 'completions': completions_by_task})
 
 
 @app.get('/')
