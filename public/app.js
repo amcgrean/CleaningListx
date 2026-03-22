@@ -737,6 +737,18 @@ document.getElementById('logout').addEventListener('click', async () => {
   location.reload();
 });
 
+const menuBtn = document.getElementById('menu-btn');
+const menuPanel = document.getElementById('menu-panel');
+
+menuBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  menuPanel.classList.toggle('hidden');
+});
+
+document.addEventListener('click', () => {
+  menuPanel.classList.add('hidden');
+});
+
 bootstrap().catch((error) => {
   authMessageEl().textContent = error.message;
 });

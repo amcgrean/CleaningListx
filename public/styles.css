@@ -78,6 +78,23 @@ button.secondary { background: #f6efea; }
 }
 .week-nav { display: flex; align-items: center; gap: 12px; }
 .user-actions { display: flex; align-items: center; gap: 10px; }
+.menu-dropdown { position: relative; }
+.menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 100;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+}
+.menu-panel button { width: 100%; text-align: left; background: #f6efea; }
 
 .weekly-grid {
   display: grid;

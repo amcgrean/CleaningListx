@@ -46,9 +46,14 @@
             </div>
             <div class="user-actions">
               <span id="whoami"></span>
-              <button id="household-btn" class="secondary">Family</button>
-              <button id="settings-btn" class="secondary">Settings</button>
-              <button id="logout" class="secondary">Logout</button>
+              <div class="menu-dropdown">
+                <button id="menu-btn" class="secondary" aria-label="Menu">&#9776;</button>
+                <div id="menu-panel" class="menu-panel hidden">
+                  <button id="household-btn">Family</button>
+                  <button id="settings-btn">Settings</button>
+                  <button id="logout">Logout</button>
+                </div>
+              </div>
             </div>
           </div>
         </header>
