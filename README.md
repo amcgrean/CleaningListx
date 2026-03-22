@@ -8,6 +8,25 @@ A one-page web app that recreates the printable cleaning schedule with login, we
 - Monthly and annual sections included in the same style
 - Persistent storage for user accounts + task completion status
 - Responsive layout designed to adapt to iPad widths
+- **Family household accounts** — invite family members to share the same cleaning list and track who completed each task
+
+## Family Households
+
+Multiple users can be grouped into a household to share a cleaning list and see each other's progress.
+
+**Creating a household:**
+1. Log in and click the **Family** button in the toolbar
+2. Enter a household name and click **Create**
+3. An 8-character invite code is generated — copy and share it with family members
+
+**Joining a household:**
+1. Log in (register first if needed), click **Family**
+2. Enter the invite code under "Join a household" and click **Join**
+
+**Tracking who did what:**
+Each task row shows a small colored circle for every household member. A faded circle means that person hasn't done the task yet; a full-color circle means they have. Hover to see the member's name.
+
+The household owner can leave at any time — ownership transfers automatically to the next member. If the last member leaves, the household is deleted.
 
 ## Run locally
 
